@@ -15,7 +15,7 @@ import yaml
 from contextlib import contextmanager
 from tqdm import tqdm
 
-__all__ = ["LumberjackInterfaceBase", "LumberjackCLI"]
+__all__ = ["LumberjackInterfaceBase", "LumberjackCLI", "LumberjackFreestyleRunner", "LumberjackTaskRunner"]
 
 
 def product_dict(**kwargs):
@@ -32,6 +32,19 @@ def group_by(iterable, n):
     _grouped_iterable = [iterable[_i*n:min(_l,(_i+1)*n)] for _i in range(_n_groups)]
     return _grouped_iterable
 
+
+class AttrDict(dict):
+    '''Dict-like container that provides access to stored values via
+    attribute access.'''
+
+    def __getattr__(self, attr):
+        try:
+            return self.__getitem__(attr)
+        except KeyError as e:
+            raise AttributeError(e)
+
+    def __setattr__(self, attr, value):
+        self.__setitem__(attr, value)
 
 class StreamDup:
     def __init__(self, streams):
@@ -71,9 +84,11 @@ class LumberjackInterfaceBase(object):
 
     RE_SPLITTING_KEY_SPEC = re.compile(r"([^[\]]*)(\[(.*)\])?")
 
+    @abc.abstractmethod
     def __init__(self, **kwargs):
-        # retrieve runner arguments and analysis config
-        self._args, self._config = self._get_args_config(**kwargs)
+        '''parse CLI arguments and retrieve analysis config'''
+        self._args = None
+        self._config = None
 
     @abc.abstractmethod
     def _get_args_config(self, **kwargs):
@@ -516,11 +531,7 @@ class LumberjackCLI(LumberjackInterfaceBase):
             parser.exit()
 
     def __init__(self):
-        super(LumberjackCLI, self).__init__()  # no kwargs
-
-    def _get_args_config(self):
-        '''parse CLI arguments and retrieve analysis config'''
-        import pkgutil
+        super(LumberjackCLI, self).__init__()  # no kwargsimport pkgutil
 
         import Karma.PostProcessing.Lumberjack.cfg as cfg_module
 
@@ -615,6 +626,138 @@ class LumberjackCLI(LumberjackInterfaceBase):
         _parsers['freestyle'].add_argument('--profiles', metavar='PROFILE', help='Specification of profiles', nargs='+')
         _parsers['freestyle'].add_argument('--output-file', metavar='OUTPUT', help="Name of the output file.", required=True)
 
-        _args = _top_parser.parse_args()
+        self._args = _top_parser.parse_args()
+        self._config = _analysis_config
 
-        return _top_parser.parse_args(), _analysis_config
+
+class LumberjackRunnerBase(LumberjackInterfaceBase):
+
+    def __init__(self,
+                 config_module,
+                 input_file,
+                 selections,
+                 input_type,
+                 tree='Events',
+                 jobs=1,
+                 num_events=-1,
+                 dry_run=False,
+                 overwrite=False,
+                 log=False,
+                 dump_yaml=False,
+                 progress=True):
+
+        # -- get config module
+        self._config = None
+        if isinstance(config_module, str):
+            # lookup config module by name
+            import Karma.PostProcessing.Lumberjack.cfg as cfg_module
+            import pkgutil
+
+            # retrieve external analysis configuration modules for Lumberjack
+            _external_path_list = (os.getenv('LUMBERJACK_CONFIGPATH') or "").split(':')
+            print('cfg_module.__path__', cfg_module.__path__)
+            for _importer, _name, _ in pkgutil.iter_modules(_external_path_list+cfg_module.__path__):
+                if _name == config_module:
+                    self._config = _importer.find_module(_name).load_module(_name)
+                    break
+
+            if self._config is None:
+                raise ImportError(
+                    "Cannot import configuration module '{}': "
+                    "no such module found in PYTHONPATH.".format(config_module)
+                )
+        else:
+            # assume module and use as config
+            self._config = config_module
+
+        self._args = AttrDict(input_file=input_file,
+                              selections=selections,
+                              input_type=input_type,
+                              tree=tree,
+                              jobs=jobs,
+                              num_events=num_events,
+                              dry_run=dry_run,
+                              overwrite=overwrite,
+                              log=log,
+                              dump_yaml=dump_yaml,
+                              progress=progress)
+
+class LumberjackTaskRunner(LumberjackRunnerBase):
+
+    def __init__(self,
+                 config_module,
+                 input_file,
+                 selections,
+                 input_type,
+                 task_names,
+                 tree='Events',
+                 jobs=1,
+                 num_events=-1,
+                 dry_run=False,
+                 overwrite=False,
+                 log=False,
+                 dump_yaml=False,
+                 progress=True,
+                 output_dir=None,
+                 output_file_suffix=None):
+
+        super(LumberjackTaskRunner, self).__init__(
+            config_module=config_module,
+            input_file=input_file,
+            selections=selections,
+            input_type=input_type,
+            tree=tree,
+            jobs=jobs,
+            num_events=num_events,
+            dry_run=dry_run,
+            overwrite=overwrite,
+            log=log,
+            dump_yaml=dump_yaml,
+            progress=progress
+        )
+
+        self._args.update(subparser_name='task',
+                          TASK_NAME=task_names,
+                          output_dir=output_dir,
+                          output_file_suffix=output_file_suffix)
+
+
+
+class LumberjackFreestyleRunner(LumberjackRunnerBase):
+
+    def __init__(self,
+                 config_module,
+                 input_file,
+                 selections,
+                 input_type,
+                 splitting_key,
+                 output_file,
+                 tree='Events',
+                 jobs=1,
+                 num_events=-1,
+                 dry_run=False,
+                 overwrite=False,
+                 log=False,
+                 dump_yaml=False,
+                 progress=True):
+
+        super(LumberjackTaskRunner, self).__init__(
+            config_module=config_module,
+            input_file=input_file,
+            selections=selections,
+            input_type=input_type,
+            tree=tree,
+            jobs=jobs,
+            num_events=num_events,
+            dry_run=dry_run,
+            overwrite=overwrite,
+            log=log,
+            dump_yaml=dump_yaml,
+            progress=progress
+        )
+
+        self._args.update(subparser_name='freestyle',
+                          SPLITTING_KEY=splitting_key,
+                          histograms=histograms,
+                          profiles=profiles,
+                          output_file=output_file)
